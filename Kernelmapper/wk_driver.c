@@ -551,7 +551,7 @@ static NTSTATUS dispatch(PDEVICE_OBJECT dev, PIRP irp)
     }
 
     case PK_IOCTL_FIND_PID: {
-        if (inLen < sizeof(KR_FIND_PID_REQ) || outLen < sizeof(KR_FIND_PID_REQ)) {
+        if (inLen < 136 || outLen < 4) {
             st = STATUS_BUFFER_TOO_SMALL; break;
         }
         KR_FIND_PID_REQ* r = (KR_FIND_PID_REQ*)buf;

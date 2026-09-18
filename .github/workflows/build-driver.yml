@@ -1,0 +1,103 @@
+name: build-driver
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile, sign, package
+        shell: pwsh
+        run: |
+          # --- 1. Trouver SDK et WDK ---
+          $kitsRoot = "C:\Program Files (x86)\Windows Kits\10\Include"
+          $wdkVersion = (Get-ChildItem $kitsRoot -Directory |
+                         Where-Object { Test-Path (Join-Path $_.FullName "km\ntddk.h") } |
+                         Sort-Object Name -Descending |
+                         Select-Object -First 1).Name
+          if (-not $wdkVersion) { throw "WDK introuvable" }
+          $sdkVersion = (Get-ChildItem $kitsRoot -Directory |
+                         Where-Object { $_.Name -match '^\d+\.' } |
+                         Sort-Object Name -Descending |
+                         Select-Object -First 1).Name
+          Write-Host "WDK: $wdkVersion  SDK: $sdkVersion"
+
+          $sdkInc = "$kitsRoot\$sdkVersion"
+          $wdkInc = "$kitsRoot\$wdkVersion"
+          $wdkLib = "C:\Program Files (x86)\Windows Kits\10\Lib\$wdkVersion\km\x64"
+          if (-not (Test-Path $wdkLib)) { throw "lib km introuvable: $wdkLib" }
+
+          # --- 2. Trouver VS via vswhere ---
+          $vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -products * `
+                       -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                       -property installationPath
+          if (-not $vsPath) { throw "VS introuvable" }
+          Write-Host "VS: $vsPath"
+          $vcvars = Join-Path $vsPath "VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat introuvable" }
+
+          # --- 3. Charger l'environnement MSVC ---
+          cmd /c "`"$vcvars`" && set" | ForEach-Object {
+              if ($_ -match "^(.*?)=(.*)$") {
+                  Set-Item -Path "env:$($matches[1])" -Value $matches[2]
+              }
+          }
+
+          # --- 4. Compiler ---
+          cd Kernelmapper
+          Write-Host "Compilation de wk_driver.c ..."
+          cl /nologo /c /O2 /GS- /kernel /Fo"wk_driver.obj" wk_driver.c `
+             /I"$wdkInc\km" /I"$sdkInc\shared" `
+             /D_WIN64 /D_AMD64_ /DAMD64 /DPOOL_NX_OPTIN=1 /DNT=1
+          if ($LASTEXITCODE -ne 0) { throw "cl.exe a échoué" }
+
+          # --- 5. Linker (NODEFAULTLIB coupe la CRT user-mode) ---
+          Write-Host "Link ..."
+          link /nologo /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry `
+               /NODEFAULTLIB `
+               /LIBPATH:"$wdkLib" `
+               /OUT:WdiSvcMon.sys wk_driver.obj `
+               ntoskrnl.lib hal.lib wdm.lib BufferOverflowK.lib aux_klib.lib
+          if ($LASTEXITCODE -ne 0) { throw "link.exe a échoué" }
+
+          # --- 6. Certificat ---
+          Write-Host "Création du certificat..."
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert `
+              -Subject "CN=WdiSvcMonLocal" `
+              -KeyUsage DigitalSignature `
+              -KeyAlgorithm RSA -KeyLength 2048 `
+              -CertStoreLocation "Cert:\CurrentUser\My" `
+              -NotAfter (Get-Date).AddYears(5)
+          Write-Host "Cert: $($cert.Thumbprint)"
+
+          # --- 7. Signature ---
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" |
+                       Where-Object { $_.FullName -match "x64" } |
+                       Select-Object -First 1).FullName
+          if (-not $signtool) { throw "signtool introuvable" }
+          Write-Host "signtool: $signtool"
+          & $signtool sign /fd SHA256 /sha1 $cert.Thumbprint /v .\WdiSvcMon.sys
+          if ($LASTEXITCODE -ne 0) { throw "signature échouée" }
+
+          # --- 8. Export certificat public ---
+          $cerPath = ".\WdiSvcMonLocal.cer"
+          Export-Certificate -Cert $cert -FilePath $cerPath -Type CERT | Out-Null
+          Write-Host "Certificat exporté: $cerPath"
+
+          # --- 9. Package pour l'artifact ---
+          New-Item -ItemType Directory -Force -Path ".\out" | Out-Null
+          Copy-Item ".\WdiSvcMon.sys"       ".\out\WdiSvcMon.sys"       -Force
+          Copy-Item ".\WdiSvcMonLocal.cer"  ".\out\WdiSvcMonLocal.cer"  -Force
+
+          Write-Host "OK - prêt pour l'artifact"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WdiSvcMon-signed
+          path: Kernelmapper/out/

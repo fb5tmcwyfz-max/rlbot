@@ -1,0 +1,481 @@
+"""
+Offsety Rocket League - Epic Games build.
+
+Zrodlo: rlsdk-main/packages/epic-games/offsets/ (ObscuritySRL SDK dump).
+Wyciete tylko pola faktycznie uzywane przez SDK. Przy update gry ktory zmieni
+uklad klas wystarczy zaktualizowac ten plik.
+
+Konwencja: wszystko `int` (hex OK). Bit masks jako `_BIT`.
+"""
+
+# ==================================================================
+# GLOBALS (RVA from module base)
+# ==================================================================
+
+GNAMES_RVA   = 0x02417158
+GOBJECTS_RVA = 0x024171A0
+
+# ==================================================================
+# UObject
+# ==================================================================
+
+UOBJECT_NAME_IDX = 0x48       # FNameEntryId (int32) -> indeks do GNames
+FNAMEENTRY_TEXT  = 0x18       # WCHAR string wewnatrz FNameEntry
+
+# ==================================================================
+# Actor (baza dla wielu klas - ma pola Location/Rotation/Velocity/AngVel)
+# Uzywane jako szybki path do fizyki obiektow (bez RBState).
+# ==================================================================
+
+class Actor:
+    LOCATION         = 0x90    # FVector (3x float)
+    ROTATION         = 0x9C    # FRotator (3x INT32 - unreal rot units, 65536=360deg)
+    VELOCITY         = 0x1A8   # FVector
+    ANGULAR_VELOCITY = 0x1C0   # FVector
+
+# ==================================================================
+# RBActor_TA - baza fizyki dla Ball_TA i Vehicle_TA
+# Ma pole RBState (replikowany stan fizyczny, bardziej autoritative niz Actor).
+# ==================================================================
+
+class RBActor:
+    OLD_RB_STATE       = 0x0590    # FReplicatedRBState
+    RB_STATE           = 0x05D0    # FReplicatedRBState (0x40 bytes)
+    REPLICATED_RBSTATE = 0x0610    # FReplicatedRBState
+    MAX_LINEAR_SPEED   = 0x0560
+    MAX_ANGULAR_SPEED  = 0x0564
+
+# FReplicatedRBState struct (0x40 bytes, w tym padding)
+class RBState:
+    QUATERNION       = 0x00      # FQuat (16B: x, y, z, w float)
+    LOCATION         = 0x10      # FVector
+    LINEAR_VELOCITY  = 0x1C      # FVector
+    ANGULAR_VELOCITY = 0x28      # FVector
+    TIME             = 0x34      # float
+    FLAGS            = 0x38      # uint8, bit 0x1=Sleeping, bit 0x2=NewData
+    SIZE             = 0x40
+
+# ==================================================================
+# Ball_TA (extends RBActor_TA, size 0xB28)
+# UPDATE: wszystkie pola +0x18 od build ktory pojawil sie ~08-2026
+# (weryfikator: Ball.GAME_EVENT ptr matches @ 0x900, RADIUS float ~95 @ 0x888).
+# ==================================================================
+
+class Ball:
+    RADIUS                     = 0x0888    # was 0x0870 (+0x18)
+    VISUAL_RADIUS              = 0x0890    # was 0x0878 (+0x18)
+    TOUCHES                    = 0x0898    # was 0x0880 (+0x18) TArray<FBallHitInfo>
+    HIT_TEAM_NUM               = 0x08A9    # was 0x0891 (+0x18) uint8
+    LAST_HIT_WORLD_TIME        = 0x08C8    # was 0x08B0 (+0x18) float timestamp
+    REPLICATED_SCALE           = 0x08CC    # was 0x08B4 (+0x18) float
+    REPLICATED_GRAVITY_SCALE   = 0x08DC    # was 0x08C4 (+0x18) float
+    GAME_EVENT                 = 0x0900    # was 0x08E8 (+0x18) VERIFIED via ptr match
+    REPLICATED_EXPLOSION_DATA  = 0x0908    # was 0x08F0 (+0x18) FExplosionData (0x18)
+    OLD_LOCATION               = 0x094C    # was 0x0934 (+0x18) FVector
+    PREDICTED_POSITIONS        = 0x0970    # was 0x0958 (+0x18) TArray<FPredictedPosition>
+    CURRENT_AFFECTOR           = 0x09B8    # was 0x09A0 (+0x18) UCar_TA*
+    TRAJECTORY_COMPONENT       = 0x09C0    # was 0x09A8 (+0x18) UBallTrajectoryComponent_TA*
+
+# ==================================================================
+# Vehicle_TA (extends RBActor_TA, size 0x8C8)
+# UPDATE ~08-2026: nowe pole ~24B dodane w Vehicle, pola >= 0x7C0 przesuniete
+# o +0x18. Wyjatki (BEZ ZMIAN):
+#   INPUT (0x7E4) - hook SetVehicleInput dalej pisze tu
+#   REPLICATED_THROTTLE/STEER (0x804/5) - nie testowane, prawdopodobnie stabilne
+#   FLAGS_BYTE (0x7E0) - unknown, moglo przejsc na 0x7F8 (pattern 0x11 pasuje)
+# Weryfikacja: 8/8 komponentow potwierdzonych przez klasy obiektow.
+# ==================================================================
+
+class Vehicle:
+    CAR_MESH            = 0x7D8    # was 0x7C0 (+0x18) VERIFIED class=CarMeshComponent_TA
+    FLAGS_BYTE          = 0x7F8    # was 0x7E0 (+0x18) VERIFIED dynamic monitor:
+                                   # 0x11=DRIVING|ON_GROUND, 0x05=DRIVING|JUMPED,
+                                   # 0x0D=DRIVING|JUMPED|DOUBLE_JUMPED - wszystkie
+                                   # bity zmieniaja sie zgodnie z akcjami auta.
+                                   # INPUT struct musiala sie skrocic (0x7E4-0x7F7,
+                                   # tylko 5 f32: THROTTLE/STEER/PITCH/YAW/ROLL).
+    FLAG_DRIVING        = 0x01
+    FLAG_HANDBRAKE      = 0x02
+    FLAG_JUMPED         = 0x04
+    FLAG_DOUBLE_JUMPED  = 0x08
+    FLAG_ON_GROUND      = 0x10
+    FLAG_SUPERSONIC     = 0x20
+    FLAG_PODIUM_MODE    = 0x40
+
+    # ZMIERZONE 2026-08-22 przez deassemblacje prawdziwego SetVehicleInput
+    # (vtable+0x830 -> RVA 0xEDEB90, patrz disasm_vfunc.py):
+    #     movups xmm0, [rdx]         movups [rcx + 0x7fc], xmm0
+    #     movups xmm1, [rdx + 0x10]  movups [rcx + 0x80c], xmm1
+    # a dalej klampowanie osi kolejno pod 0x7FC/0x800/0x804/0x808/0x80C.
+    #
+    # Bylo 0x7E4 z adnotacja "unchanged - hook target, musi byc stabilne".
+    # To bylo ZALOZENIE, nie pomiar: pole przesunelo sie o +0x18 razem z cala
+    # reszta >= 0x7C0. Odczyt spod 0x7E4 zwracal stale smieci (pitch=1.50,
+    # yaw=80.00), przez co diagnostyka inputu byla bezuzyteczna.
+    INPUT               = 0x7FC    # was 0x7E4 (+0x18) ZMIERZONE
+    LOCAL_COLL_OFFSET   = 0x850    # was 0x838 (+0x18) FVector - center hitboxa (local)
+    LOCAL_COLL_EXTENT   = 0x85C    # was 0x844 (+0x18) FVector - polowki hitboxa
+    # UWAGA: 0x804/0x805 to NIE sa juz te pola - pod 0x804 siedzi float PITCH
+    # ze struktury INPUT (0x7FC + 0x08). Zapis dwoch bajtow w to miejsce
+    # rozjezdza pitcha auta. Wartosci ponizej sa NIEZWERYFIKOWANE; jesli
+    # przesunely sie tak jak reszta klasy, beda pod 0x81C/0x81D, ale nikt
+    # tego nie zmierzyl. Nie uzywaj ich, dopoki nie potwierdzisz
+    # deassemblacja (disasm_vfunc.py).
+    REPLICATED_THROTTLE = 0x804    # PODEJRZANE - koliduje z INPUT.PITCH
+    REPLICATED_STEER    = 0x805    # PODEJRZANE - koliduje z INPUT.PITCH
+    AI_CONTROLLER       = 0x820    # was 0x808 (+0x18) UAIController_TA*
+    PLAYER_CONTROLLER   = 0x828    # was 0x810 (+0x18) VERIFIED ptr match
+    PRI                 = 0x830    # was 0x818 (+0x18) VERIFIED ptr match
+    BOOST_COMPONENT     = 0x870    # was 0x858 (+0x18) VERIFIED class=Boost_TA
+    DODGE_COMPONENT     = 0x878    # was 0x860 (+0x18) VERIFIED class=Dodge_TA
+    AIR_CONTROL_COMPONENT = 0x880  # was 0x868 (+0x18) VERIFIED class=AirControl_TA
+    JUMP_COMPONENT      = 0x888    # was 0x870 (+0x18) VERIFIED class=Jump_TA
+    DOUBLE_JUMP_COMPONENT = 0x890  # was 0x878 (+0x18) VERIFIED class=DoubleJump_TA
+
+# ==================================================================
+# Car_TA (extends Vehicle_TA, size 0xC68)
+# UPDATE ~08-2026: wszystkie pola +0x18 (wszystkie 3 sprawdzone przesuniete)
+# ==================================================================
+
+class Car:
+    BFLAGS_2              = 0x0920    # was 0x0908 (+0x18) uint32 bitfield
+    FLAG_DODGES_REFRESHED = 0x0800    # bit mask - bez zmian
+    DODGES_REFRESHED_CTR  = 0x0AE8    # was 0x0AD0 (+0x18) int32
+    REPLICATED_DEMOLISH   = 0x09D8    # was 0x09C0 (+0x18) FDemolishData (0x28)
+    REPLICATED_DEMOLISH_X = 0x0990    # was 0x0978 (+0x18) FDemolishDataExtended (0x48)
+    ATTACKER_PRI          = 0x0A68    # was 0x0A50 (+0x18) UPRI_TA*
+    GAME_EVENT            = 0x0AB8    # was 0x0AA0 (+0x18) VERIFIED class match
+    MAX_TIME_FOR_DODGE    = 0x0960    # was 0x0948 (+0x18) VERIFIED f32=1.250
+    MAX_NUM_JUMPS         = 0x0964    # was 0x094C (+0x18) int32
+    CAR_TRAJECTORY_COMP   = 0x0AB0    # was 0x0A98 (+0x18) VERIFIED class match
+    DOUBLE_JUMPS_CTR      = 0x0ADC    # was 0x0AC4 (+0x18) int32
+    REPLICATED_CAR_SCALE  = 0x098C    # was 0x0974 (+0x18) float
+
+# ==================================================================
+# Body/hitbox detection - CarMesh -> BodyAsset -> Product -> AssetPackageName
+# Uzywane tylko dla symbolicznej nazwy ("Body_Octane_SF"), primary detection
+# leci przez wymiary z Vehicle.LOCAL_COLL_EXTENT.
+# ==================================================================
+
+class CarMeshComponent:
+    BODY_ASSET = 0x07B8    # UProductAsset_Body_TA*
+
+class ProductAsset:
+    PRODUCT    = 0x0060    # UProduct_TA*
+
+class Product:
+    ASSET_PACKAGE_NAME = 0x0138    # FName (int32 idx -> GNames)
+    ASCII_LABEL        = 0x0168    # FString
+
+# ==================================================================
+# PRI_TA (Player Replication Info; size 0xD40, extends PRI_X)
+# ==================================================================
+
+class PRI:
+    # Bazowe (z PlayerReplicationInfo)
+    PLAYER_NAME     = 0x0288    # FString
+    PLAYER_ID       = 0x02A8    # int32
+    TEAM            = 0x02B0    # UTeamInfo* (mozna rzutowac na UTeam_TA*)
+    IS_BOT_FLAGS    = 0x02B8    # uint32 bitfield
+    FLAG_IS_BOT     = 0x40
+    UNIQUE_ID       = 0x02F8    # FUniqueNetId (0x48)
+
+    # Match stats
+    MATCH_SCORE      = 0x0458    # int32
+    MATCH_GOALS      = 0x045C
+    MATCH_OWN_GOALS  = 0x0460
+    MATCH_ASSISTS    = 0x0464
+    MATCH_SAVES      = 0x0468
+    MATCH_SHOTS      = 0x046C
+    MATCH_DEMOLISHES = 0x0470
+
+    # Bity - MatchFlags (offset 0x480)
+    MATCH_FLAGS      = 0x0480
+    FLAG_MVP         = 0x0001
+    FLAG_READY       = 0x0100
+
+    CAR              = 0x0498    # UCar_TA*
+    BOOST_PICKUPS    = 0x0748    # int32
+    DODGES           = 0x075C    # int32
+    BALL_TOUCHES     = 0x0764    # int32
+
+# ==================================================================
+# TeamInfo (baza dla Team_TA)
+# ==================================================================
+
+class TeamInfo:
+    SIZE_FIELD = 0x0278    # int32 team size cap
+    SCORE      = 0x027C    # int32 (visible score)
+    TEAM_INDEX = 0x0280    # int32 (0=blue, 1=orange)
+    TEAM_COLOR = 0x0284    # FColor (4 bytes)
+
+# ==================================================================
+# Team_TA (size 0x488, extends TeamInfo)
+# ==================================================================
+
+class Team:
+    GAME_EVENT       = 0x0310    # UGameEvent_Team_TA*
+    MEMBERS          = 0x0318    # TArray<UPRI_TA*>
+    CUSTOM_TEAM_NAME = 0x0338    # FString
+    CLUB_ID          = 0x0350    # uint64
+    FORFEIT_FLAGS    = 0x0388
+    FLAG_FORFEIT     = 0x01
+
+# Team_Soccar_TA (subclass) - dodatkowe pole
+class TeamSoccar:
+    GAME_SCORE = 0x0488    # int32
+
+# ==================================================================
+# GameEvent_TA (baza)
+# ==================================================================
+
+class GameEvent:
+    PLAYERS       = 0x0330    # TArray<UPlayer*>
+    PRIS          = 0x0340    # TArray<UPRI_TA*>
+    CARS          = 0x0350    # TArray<UCar_TA*>
+    LOCAL_PLAYERS = 0x0360
+
+class Controller:
+    # PlayerController_TA - chain do lokalnego auta (LocalPlayers[0] -> PC -> Pawn)
+    PAWN = 0x280    # UPawn* (== Vehicle_TA*/Car_TA*) - NASZE auto
+    PRI  = 0x288    # UPRI_TA*
+
+# ==================================================================
+# PlayerController_TA (extends PlayerControllerBase_TA, size 0xDC8)
+#
+# DRUGI KANAL STEROWANIA - obok FVehicleInputs w Vehicle_TA (+0x7E4).
+# Roznica jest istotna:
+#
+#   Vehicle_TA.INPUT (0x7E4)  = input JUZ ZAAPLIKOWANY do fizyki auta.
+#                               Nasz kernel patch SetVehicleInput pisze wlasnie
+#                               tutaj -> lokalna fizyka jedzie jak chcemy.
+#
+#   PlayerController.VehicleInput (0x9B0) = input zebrany z pada/klawiatury
+#                               w tej klatce; PlayerMove() wysyla go dalej przez
+#                               ProcessMove_TA -> (a) lokalne SetVehicleInput
+#                               (b) PAKIET RUCHU DO SERWERA w multiplayer.
+#                               Bez pisania po tej stronie serwer widzi input
+#                               CZLOWIEKA (neutral) i koryguje auto -> rubber band.
+#
+#   PlayerController.OverrideInput (0xB18) + bOverrideInput (bit 0x4 w 0x9D0)
+#                             = kanal "podmien input" ktory gra sama obsluguje
+#                               w PlayerMove. Semantyka TRWALEJ WARTOSCI (nie
+#                               event) - wystarczy trzymac aktualne, nie ma race
+#                               z game logic tak jak przy pisaniu do 0x7E4.
+#
+# Zrodlo: sdk_dump/TAGame.txt (Class TAGame.PlayerController_TA)
+# ==================================================================
+
+class PlayerController:
+    CAR            = 0x09A0    # UCar_TA*  (nasze auto wg PC)
+    PRI            = 0x09A8    # UPRI_TA*
+    VEHICLE_INPUT  = 0x09B0    # FVehicleInputs (0x20) - input tej klatki
+
+    INPUT_FLAGS    = 0x09D0    # uint32 bitfield
+    FLAG_OVERRIDE_INPUT        = 0x0004   # bOverrideInput
+    FLAG_JUMP_PRESSED          = 0x0008   # bJumpPressed
+    FLAG_BOOST_PRESSED         = 0x0010   # bBoostPressed
+    FLAG_HANDBRAKE_PRESSED     = 0x0020   # bHandbrakePressed
+    FLAG_HAS_PITCHED_OR_ROLLED = 0x0040   # bHasPitchedOrRolled (gra zarzadza)
+    FLAG_AIR_PITCH_SAFETY      = 0x0080   # bAirPitchSafetyEnabled (gra zarzadza)
+
+    OVERRIDE_INPUT = 0x0B18    # FVehicleInputs (0x20) - uzyty gdy bOverrideInput
+    LAST_INPUTS    = 0x0B68    # FVehicleInputs (0x20) - poprzednia klatka (RO)
+
+    CACHED_INPUT_PITCH = 0x0C78    # float
+    CACHED_INPUT_YAW   = 0x0C7C    # float
+
+class GameEventTeam:
+    TEAMS = 0x0778           # TArray<UTeam_TA*>
+    MAX_TEAM_SIZE = 0x0788   # int32 - 1/2/3/4 (rozmiar druzyny)
+    NUM_BOTS      = 0x078C   # int32 - ile AI dolaczono
+
+# ==================================================================
+# GameEvent_Soccar_TA (extends GameEvent_Team_TA, size 0xE98)
+# ==================================================================
+
+class GameEventSoccar:
+    # Bity round/match state
+    # ZYWE tablice gry - czytane co klatke, zero skanu GObjects.
+    # TArray = {void* data; int32 count; int32 max}
+    PLAYERS          = 0x0330    # TArray<UController*>
+    PRIS             = 0x0340    # TArray<UPRI_TA*>
+    CARS             = 0x0350    # TArray<UCar_TA*>
+    LOCAL_PLAYERS    = 0x0360    # TArray<UPlayerController_TA*>
+
+    STATE_FLAGS      = 0x0828    # uint32 bitfield
+    FLAG_ROUND_ACTIVE   = 0x0004
+    #: Pilka zostala juz uderzona w tej rundzie. Razem z FLAG_ROUND_ACTIVE daje
+    #: odpowiednik RLBotowego `packet.game_info.is_kickoff_pause`:
+    #:     kickoff == FLAG_ROUND_ACTIVE and not FLAG_BALL_HAS_BEEN_HIT
+    #: (UGameEvent_Soccar_TA, dump: bBallHasBeenHit 0x0828 bit 0x10)
+    FLAG_BALL_HAS_BEEN_HIT = 0x0010
+    FLAG_OVERTIME       = 0x0020
+    FLAG_UNLIMITED_TIME = 0x0040
+    FLAG_MATCH_ENDED    = 0x2000
+
+    GAME_TIME              = 0x085C    # int32 (total match seconds)
+    WARMUP_TIME            = 0x0860
+    MAX_SCORE              = 0x0864
+    GAME_TIME_REMAINING    = 0x0894    # float (accurate remaining)
+    SECONDS_REMAINING      = 0x0898    # int32 (integer countdown)
+    TOTAL_GAME_TIME_PLAYED = 0x08A0    # float
+    OVERTIME_TIME_PLAYED   = 0x08A4    # float
+    GAME_BALLS             = 0x0908    # TArray<UBall_TA*>
+    TOTAL_GAME_BALLS       = 0x0918
+    GAME_WINNER            = 0x0958    # UTeam_TA*
+    MATCH_WINNER           = 0x0960    # UTeam_TA*
+    TEAM_LAST_SCORED       = 0x0968
+    MVP                    = 0x0978    # UPRI_TA*
+    SCORING_PLAYER         = 0x09A8
+    ROUND_NUM              = 0x09B0
+
+# ==================================================================
+# VehiclePickup_TA (baza) + VehiclePickup_Boost_TA
+# ==================================================================
+
+class VehiclePickup:
+    PREVIOUS_PICKED_UP_VALUE = 0x0268    # uint8 - parzysty=dostepny, nieparzysty=picked
+    RESPAWN_DELAY            = 0x026C    # float
+    REPLICATED_PICKUP_DATA   = 0x0298    # FPickupData (0x10)
+    NEW_REPLICATED_DATA      = 0x02A8    # FPickupData2 (0x10)
+    NO_PICKUP_FLAGS          = 0x02B8
+    FLAG_NO_PICKUP           = 0x02
+
+class BoostPickup:
+    # UPDATE ~08-2026: BOOST_TYPE przesuniete o -0x50; BOOST_AMOUNT ma teraz
+    # dziwne wartosci (0.12 vs 9999.0 zamiast 12/100) - format sie zmienil.
+    # Do detekcji small/big uzywaj BOOST_TYPE (u8 0=small/1=big) lub
+    # RESPAWN_DELAY (4.0 = small, 10.0 = big).
+    BOOST_AMOUNT = 0x02F8    # unchanged offset, ale wartosci format zmieniony
+    BOOST_TYPE   = 0x02B8    # was 0x0308 (-0x50) VERIFIED u8 {0:28, 1:6}
+
+# ==================================================================
+# CarComponent_TA (baza dla Boost/Jump/Dodge/DoubleJump)
+# ==================================================================
+
+class CarComponent:
+    """Wspolne dla wszystkich CarComponent_TA - Active/timings."""
+    ACTIVE_FLAGS = 0x02F8    # uint32 bitfield (Active na bit 0x1)
+    FLAG_ACTIVE  = 0x01
+    ACTIVE_TIME  = 0x02FC    # float - kiedy komponent aktywowany
+    LAST_ACTIVE_TIME = 0x0300  # float
+
+# ==================================================================
+# CarComponent_Jump_TA
+# ==================================================================
+
+class JumpComponent:
+    ACTIVE_FLAGS  = 0x02F8   # z base
+    FLAG_ACTIVE   = 0x01
+    LAST_JUMP_TIME = 0x0300  # float
+
+# ==================================================================
+# CarComponent_Dodge_TA
+# ==================================================================
+
+class DodgeComponent:
+    ACTIVE_FLAGS   = 0x02F8
+    FLAG_ACTIVE    = 0x01
+    LAST_DODGE_TIME = 0x0320  # float
+    DODGE_DIR      = 0x0330   # FVector2D (2 floaty)
+    DODGE_TORQUE   = 0x0338   # FVector
+
+# ==================================================================
+# CarComponent_DoubleJump_TA
+# ==================================================================
+
+class DoubleJumpComponent:
+    ACTIVE_FLAGS = 0x02F8
+    FLAG_ACTIVE  = 0x01
+    LAST_JUMP_TIME = 0x0300
+
+# ==================================================================
+# CarComponent_Boost_TA (size 0x398, extends CarComponent_TA)
+# ==================================================================
+
+class BoostComponent:
+    # Z CarComponent_TA (baza):
+    VEHICLE   = 0x0288    # UVehicle_TA* (owner)
+    CAR       = 0x0290    # UCar_TA*
+    ACTIVATOR = 0x0280    # UPRI_TA*
+
+    # Wlasciwe:
+    CONSUMPTION_RATE  = 0x0328    # float
+    MAX_AMOUNT        = 0x032C    # float
+    START_AMOUNT      = 0x0330
+    BOOST_USED        = 0x0334
+    CURRENT_AMOUNT    = 0x0338    # float 0.0-1.0 GLOWNE
+    BOOST_MODIFIER    = 0x033C
+    BOOST_FLAGS       = 0x0348
+    FLAG_NO_BOOST     = 0x04
+    BOOST_FORCE       = 0x034C
+    RECHARGE_RATE     = 0x0354
+    REPLICATED_AMOUNT = 0x0361    # uint8
+
+# ==================================================================
+# BallTrajectoryComponent_TA (size 0x110)
+# Gra sama liczy trajektorie dla piłki - my tylko odczytujemy TrajectoryPoints.
+# ==================================================================
+
+class BallTrajectory:
+    ENABLED_FLAGS      = 0x00A8    # uint32
+    FLAG_ENABLED       = 0x01
+    FLAG_CALC_POINTS   = 0x02
+    TRAJECTORY_POINTS  = 0x00B0    # TArray<FVector>
+    TRAJECTORY_SETUP   = 0x00C0    # FTrajectorySetup (0x14)
+    TOTAL_PATH_DIST    = 0x00D4
+    START_LOCATION     = 0x00D8
+    START_VELOCITY     = 0x00E4
+    TRAJECTORY_UPDATE_TIME = 0x00F0
+
+# ==================================================================
+# FVehicleInputs (0x20 bytes) - do zapisu pod Vehicle_TA + INPUT (0x7E4)
+# ==================================================================
+
+class VehicleInputs:
+    THROTTLE       = 0x00
+    STEER          = 0x04
+    PITCH          = 0x08
+    YAW            = 0x0C
+    ROLL           = 0x10
+    DODGE_FORWARD  = 0x14
+    DODGE_RIGHT    = 0x18
+    BUTTONS        = 0x1C
+    SIZE           = 0x20
+    # Bit masks in BUTTONS
+    BIT_HANDBRAKE       = 0x01
+    BIT_JUMP            = 0x02
+    BIT_ACTIVATE_BOOST  = 0x04
+    BIT_HOLDING_BOOST   = 0x08
+    BIT_JUMPED          = 0x10
+    BIT_GRAB            = 0x20
+    BIT_BUTTON_MASH     = 0x40
+    BIT_AIR_ROLL        = 0x80
+
+# ==================================================================
+# Class names (used with Reflection.highest())
+# Rozne tryby gry uzywaja roznych podklas Car_TA/GameEvent_TA.
+# ==================================================================
+
+CLASS_BALL                = "Ball_TA"
+CLASS_CAR                 = "Car_TA"            # rzadko - gra spawnuje podklase
+CLASS_CAR_FREEPLAY        = "Car_Freeplay_TA"
+CLASS_CAR_SEASON          = "Car_Season_TA"
+CLASS_CAR_KNOCKOUT        = "Car_KnockOut_TA"
+CLASS_TEAM                = "Team_TA"
+CLASS_TEAM_SOCCAR         = "Team_Soccar_TA"
+CLASS_PRI                 = "PRI_TA"
+CLASS_GAMEEVENT_SOCCAR    = "GameEvent_Soccar_TA"
+CLASS_GAMEEVENT_TA        = "GameEvent_TA"
+CLASS_BOOST_PICKUP        = "VehiclePickup_Boost_TA"
+CLASS_BALL_TRAJECTORY     = "BallTrajectoryComponent_TA"
+
+# Wygodna lista wszystkich znanych podklas auta - do prob znalezienia zywej
+# instancji w dowolnym trybie:
+CAR_CLASS_CANDIDATES = (
+    CLASS_CAR_FREEPLAY,
+    CLASS_CAR_SEASON,
+    CLASS_CAR_KNOCKOUT,
+    CLASS_CAR,   # fallback - CDO ale odsiewamy przez najwyzszy indeks
+)
